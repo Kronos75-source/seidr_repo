@@ -1,0 +1,348 @@
+from __future__ import annotations
+
+import re
+from datetime import datetime
+from pathlib import Path
+
+INPUT_FILE = Path(
+    r"C:\Users\Lord of Cinder\Desktop\Fall_2026\3. Seiðr"
+    r"\Seiðr Repository\2026 Raw Text\Text Exerpts\paragraph_excerpts.txt"
+)
+
+OUTPUT_FILE = Path(
+    r"C:\Users\Lord of Cinder\Desktop\Fall_2026\3. Seiðr"
+    r"\Seiðr Repository\2026 Archive\Generated_Tex_Records"
+    r"\matching_paragraph_excerpts.tex"
+)
+
+
+def latex_escape(text: str) -> str:
+    replacements = {
+        "\\": r"\textbackslash{}",
+        "&": r"\&",
+        "%": r"\%",
+        "$": r"\$",
+        "#": r"\#",
+        "_": r"\_",
+        "{": r"\{",
+        "}": r"\}",
+        "~": r"\textasciitilde{}",
+        "^": r"\textasciicircum{}",
+    }
+    return "".join(replacements.get(char, char) for char in text)
+
+
+def latex_path(text: str) -> str:
+    return latex_escape(text.replace("\\", "/"))
+
+
+def read_text(path: Path) -> str:
+    for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            return path.read_text(encoding=encoding)
+        except UnicodeDecodeError:
+            continue
+    raise UnicodeDecodeError("unknown", b"", 0, 1, "Could not decode input file")
+
+
+def parse_header_value(text: str, label: str) -> str:
+    match = re.search(rf"^{re.escape(label)}\s*:\s*(.+)$", text, flags=re.MULTILINE)
+    return match.group(1).strip() if match else ""
+
+
+def parse_entries(text: str) -> list[dict[str, str]]:
+    separator = "=" * 78
+    parts = text.split(separator)
+    entries: list[dict[str, str]] = []
+
+    for part in parts[1:]:
+        part = part.strip()
+        if not part or "Source file:" not in part:
+            continue
+
+        metadata, divider, body = part.partition("-" * 78)
+        if not divider:
+            continue
+
+        fields: dict[str, str] = {}
+        field_map = {
+            "Source file": "file",
+            "Folder": "folder",
+            "Source path": "path",
+            "Date modified": "modified",
+            "Paragraph": "paragraph",
+            "Excerpt type": "type",
+            "Matched term(s)": "terms",
+            "Note": "note",
+        }
+
+        for line in metadata.splitlines():
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            key = key.strip()
+            if key in field_map:
+                fields[field_map[key]] = value.strip()
+
+        body = body.strip()
+        if fields.get("file") and body:
+            fields["body"] = body
+            entries.append(fields)
+
+    return entries
+
+
+def highlight_terms(text: str, terms: list[str]) -> str:
+    escaped_terms = [latex_escape(term) for term in terms if term.strip()]
+    escaped_text = latex_escape(text)
+
+    for term in sorted(escaped_terms, key=len, reverse=True):
+        if not term:
+            continue
+        pattern = re.compile(re.escape(term), flags=re.IGNORECASE)
+        escaped_text = pattern.sub(lambda match: r"\hit{" + match.group(0) + "}", escaped_text)
+
+    return escaped_text
+
+
+def render_entry(entry: dict[str, str], terms: list[str]) -> str:
+    key_order = ["file", "folder", "path", "modified", "paragraph", "type", "terms", "note"]
+    key_names = {
+        "file": "file",
+        "folder": "folder",
+        "path": "path",
+        "modified": "modified",
+        "paragraph": "paragraph",
+        "type": "type",
+        "terms": "terms",
+        "note": "note",
+    }
+
+    lines = [r"\begin{excerpt}{"]
+    for key in key_order:
+        value = entry.get(key, "").strip()
+        if not value:
+            continue
+        safe_value = latex_path(value) if key == "path" else latex_escape(value)
+        lines.append(f"  {key_names[key]:<10}= {{{safe_value}}},")
+    lines.append("}")
+
+    body_paragraphs = re.split(r"\n\s*\n", entry["body"])
+    lines.append("\n\n".join(highlight_terms(paragraph.strip(), terms) for paragraph in body_paragraphs if paragraph.strip()))
+    lines.append(r"\end{excerpt}")
+    return "\n".join(lines)
+
+
+def main() -> None:
+    if not INPUT_FILE.is_file():
+        raise FileNotFoundError(f"Input file was not found: {INPUT_FILE}")
+
+    source = read_text(INPUT_FILE)
+    entries = parse_entries(source)
+
+    if not entries:
+        raise ValueError("No excerpt entries were parsed. Check the input format and separator lines.")
+
+    search_terms_text = parse_header_value(source, "Search terms")
+    repository = parse_header_value(source, "Repository searched")
+    files_searched = parse_header_value(source, "Files searched")
+    files_matched = parse_header_value(source, "Files containing matches")
+    paragraphs_extracted = parse_header_value(source, "Matching paragraphs extracted")
+
+    if not paragraphs_extracted:
+        paragraphs_extracted = str(len(entries))
+
+    terms = [term.strip() for term in search_terms_text.split(";") if term.strip()]
+
+    template = r'''% =====================================================================
+% AUTO-GENERATED EXCERPT LOG
+% Source: paragraph_excerpts.txt
+% =====================================================================
+\documentclass[11pt,letterpaper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage[letterpaper,top=1.05in,bottom=1.15in,left=1.1in,right=1.1in,headheight=15pt,headsep=18pt,footskip=30pt]{geometry}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{lastpage}
+\usepackage{titlesec}
+\usepackage{keyval}
+\usepackage{needspace}
+\usepackage{ragged2e}
+\usepackage{hyperref}
+
+\newcommand{\headfont}{\sffamily}
+\newcommand{\lbl}[1]{\textls[60]{\MakeUppercase{#1}}}
+\definecolor{linkgray}{gray}{0.25}
+\definecolor{rulegray}{gray}{0.35}
+\definecolor{panelgray}{gray}{0.95}
+\definecolor{hitcolor}{rgb}{0.98,0.94,0.75}
+\hypersetup{colorlinks=true,linkcolor=linkgray,citecolor=linkgray,urlcolor=linkgray,pdfborder={0 0 0}}
+
+\newcommand{\organization}{SCP Foundation}
+\newcommand{\orgsub}{Department of Applied Runology}
+\newcommand{\orgaddress}{Archival Retrieval Service \textbar{} Internal Distribution Only}
+\newcommand{\doctitle}{Matching Paragraph Excerpts}
+\newcommand{\docsubject}{Repository Extraction Log}
+\newcommand{\docnumber}{EXC-__DOCNUMBER__}
+\newcommand{\docdate}{\today}
+\newcommand{\docclass}{Classification: Level 3 / Restricted}
+\newcommand{\runningtitle}{Excerpt Log}
+\newcommand{\runningclass}{RESTRICTED}
+\newcommand{\searchterms}{__SEARCHTERMS__}
+\newcommand{\repository}{__REPOSITORY__}
+\newcommand{\filessearched}{__FILESSEARCHED__}
+\newcommand{\filesmatched}{__FILESMATCHED__}
+\newcommand{\paragraphsextracted}{__PARAGRAPHSEXTRACTED__}
+
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\footrulewidth}{0.4pt}
+\fancyhead[L]{\headfont\footnotesize\docnumber}
+\fancyhead[R]{\headfont\footnotesize\runningtitle}
+\fancyfoot[L]{\headfont\scriptsize\runningclass}
+\fancyfoot[C]{\headfont\footnotesize Page \thepage\ of \pageref*{LastPage}}
+\fancyfoot[R]{\headfont\scriptsize\docdate}
+
+\fancypagestyle{firstpage}{%
+  \fancyhf{}%
+  \renewcommand{\headrulewidth}{0pt}%
+  \renewcommand{\footrulewidth}{0.4pt}%
+  \fancyfoot[L]{\headfont\scriptsize\runningclass}%
+  \fancyfoot[C]{\headfont\footnotesize Page \thepage\ of \pageref*{LastPage}}%
+  \fancyfoot[R]{\headfont\scriptsize\docdate}%
+}
+
+\newcommand{\reportheader}{%
+  \thispagestyle{firstpage}%
+  \begingroup\setlength{\parindent}{0pt}%
+  \begin{center}
+    {\headfont\bfseries\LARGE\MakeUppercase{\organization}\par}
+    \vspace{3pt}{\headfont\normalsize\orgsub\par}
+    \vspace{3pt}{\headfont\scriptsize\color{rulegray}\orgaddress\par}
+  \end{center}
+  \vspace{8pt}{\color{rulegray}\hrule height 1.1pt}\vspace{1.8pt}{\color{rulegray}\hrule height 0.4pt}\vspace{26pt}
+  \begin{center}
+    {\headfont\bfseries\LARGE\MakeUppercase{\doctitle}\par}
+    \vspace{8pt}{\headfont\large\color{rulegray}\docsubject\par}
+  \end{center}
+  \vspace{16pt}
+  {\footnotesize\begin{tabular*}{\textwidth}{@{\extracolsep{\fill}}l l r@{}}
+    \toprule
+    {\headfont\scriptsize\lbl{Document No.}} & {\headfont\scriptsize\lbl{Date}} & {\headfont\scriptsize\lbl{Classification}}\\
+    \midrule
+    \docnumber & \docdate & \docclass\\
+    \bottomrule
+  \end{tabular*}}
+  \vspace{22pt}\endgroup
+}
+
+\newcommand{\searchmanifest}{%
+  \begingroup\setlength{\parindent}{0pt}%
+  \noindent\colorbox{panelgray}{\begin{minipage}{\dimexpr\textwidth-2\fboxsep\relax}
+    \vspace{4pt}{\headfont\scriptsize\bfseries\lbl{Search Manifest}}\par\vspace{5pt}
+    {\footnotesize\begin{tabular}{@{}>{\headfont\color{rulegray}}l@{\hspace{1.2em}}p{0.68\textwidth}@{}}
+      Search terms & \texttt{\searchterms}\\[2pt]
+      Repository & {\ttfamily\footnotesize\RaggedRight\repository}\\[2pt]
+      Files searched & \filessearched\\[2pt]
+      Files with matches & \filesmatched\\[2pt]
+      Paragraphs extracted & \paragraphsextracted\\
+    \end{tabular}}\vspace{6pt}
+  \end{minipage}}\vspace{14pt}\endgroup
+}
+
+\titleformat{\section}[block]{\headfont\large\bfseries}{\thesection.}{0.6em}{}[\vspace{2pt}{\color{rulegray}\titlerule[0.4pt]}]
+\titlespacing*{\section}{0pt}{18pt}{8pt}
+\setlength{\parindent}{1.5em}
+\linespread{1.05}
+
+\newcounter{excerpt}
+\renewcommand{\theexcerpt}{\arabic{excerpt}}
+\makeatletter
+\define@key{exc}{file}{\def\excFile{#1}}
+\define@key{exc}{folder}{\def\excFolder{#1}}
+\define@key{exc}{path}{\def\excPath{#1}}
+\define@key{exc}{modified}{\def\excMod{#1}}
+\define@key{exc}{paragraph}{\def\excPara{#1}}
+\define@key{exc}{type}{\def\excType{#1}}
+\define@key{exc}{terms}{\def\excTerms{#1}}
+\define@key{exc}{note}{\def\excNote{#1}}
+\newcommand{\excreset}{\def\excFile{}\def\excFolder{}\def\excPath{}\def\excMod{}\def\excPara{}\def\excType{}\def\excTerms{}\def\excNote{}}
+\newcommand{\excrow}[2]{\ifx#2\@empty\else{\headfont\color{rulegray}#1} & #2\\[1.5pt]\fi}
+\newcommand{\excrowmono}[2]{\ifx#2\@empty\else{\headfont\color{rulegray}#1} & {\ttfamily\footnotesize #2}\\[1.5pt]\fi}
+\newcommand*{\l@excerptentry}[2]{\@dottedtocline{1}{0em}{2.8em}{#1}{#2}}
+\newcommand{\listofexcerpts}{\par\noindent{\headfont\large\bfseries Index of Excerpts\par}\vspace{4pt}{\color{rulegray}\hrule height 0.4pt}\vspace{4pt}\begingroup\small\@starttoc{exc}\endgroup\vspace{14pt}}
+\makeatother
+
+\newenvironment{excerpt}[1]%
+{%
+  \excreset\setkeys{exc}{#1}%
+  \refstepcounter{excerpt}%
+  \addcontentsline{exc}{excerptentry}{\protect\numberline{\theexcerpt.}\excFile}%
+  \par\needspace{5\baselineskip}%
+  \begingroup\setlength{\parindent}{0pt}%
+  {\color{rulegray}\hrule height 0.9pt}\vspace{4pt}
+  \noindent{\headfont\scriptsize\bfseries\lbl{Entry \theexcerpt}}\hfill{\headfont\footnotesize\bfseries\excFile}\par
+  \vspace{4pt}{\color{rulegray}\hrule height 0.4pt}\vspace{6pt}
+  {\footnotesize\begin{tabular}{@{}l@{\hspace{1.1em}}p{0.74\textwidth}@{}}
+    \excrow{Folder}{\excFolder}
+    \excrowmono{Source path}{\excPath}
+    \excrow{Date modified}{\excMod}
+    \excrow{Paragraph}{\excPara}
+    \excrow{Excerpt type}{\excType}
+    \excrow{Matched terms}{\excTerms}
+    \excrow{Note}{\excNote}
+  \end{tabular}}\par
+  \vspace{7pt}{\color{rulegray}\hrule height 0.4pt}\vspace{7pt}
+  \small\list{}{\leftmargin=1.4em \rightmargin=0.6em \listparindent=1.2em \itemindent=0pt \parsep=0.5\baselineskip}\item\relax
+}%
+{%
+  \endlist\vspace{2pt}{\color{rulegray}\hrule height 0.4pt}\endgroup\vspace{20pt}\par
+}
+
+\newcommand{\hit}[1]{\colorbox{hitcolor}{\strut #1}}
+
+\begin{document}
+\reportheader
+\searchmanifest
+\listofexcerpts
+
+% ---------------------------------------------------------------------
+% AUTO-GENERATED ENTRIES
+% ---------------------------------------------------------------------
+
+__ENTRIES__
+
+\end{document}
+'''
+
+    today_id = datetime.now().strftime("%Y%m%d")
+    replacements = {
+        "__DOCNUMBER__": today_id,
+        "__SEARCHTERMS__": latex_escape(search_terms_text or "Not recorded"),
+        "__REPOSITORY__": latex_path(repository or "Not recorded"),
+        "__FILESSEARCHED__": latex_escape(files_searched or "Not recorded"),
+        "__FILESMATCHED__": latex_escape(files_matched or "Not recorded"),
+        "__PARAGRAPHSEXTRACTED__": latex_escape(paragraphs_extracted),
+        "__ENTRIES__": "\n\n".join(render_entry(entry, terms) for entry in entries),
+    }
+
+    for old, new in replacements.items():
+        template = template.replace(old, new)
+
+    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    OUTPUT_FILE.write_text(template, encoding="utf-8")
+
+    print(f"Parsed {len(entries)} excerpt entries.")
+    print(f"Created LaTeX file:\n{OUTPUT_FILE}")
+
+
+main()
