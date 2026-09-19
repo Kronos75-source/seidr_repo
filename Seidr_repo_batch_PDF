@@ -1,0 +1,453 @@
+from pathlib import Path
+import csv
+import shutil
+import subprocess
+
+# -------------------------------------------------------------------
+# SOURCE: STANDALONE GENERATED .TEX RECORD PROJECTS
+# -------------------------------------------------------------------
+
+GENERATED_TEX_ROOT = Path(
+    r"C:\Users\Lord of Cinder\Desktop\Fall_2026\3. Seiðr"
+    r"\Seiðr Repository\2026 Archive\Generated_Tex_Records"
+)
+
+# -------------------------------------------------------------------
+# DESTINATION: PDF ARCHIVE FOLDERS
+# -------------------------------------------------------------------
+
+PDF_ARCHIVE_ROOT = Path(
+    r"C:\Users\Lord of Cinder\Desktop\Fall_2026\3. Seiðr"
+    r"\Seiðr Repository\2026 Archive\PDF Archive"
+)
+
+PDF_ARCHIVE_FOLDERS = {
+    "Freyja & Rán": PDF_ARCHIVE_ROOT / "Freyja & Rán",
+    "Lilith": PDF_ARCHIVE_ROOT / "Lilith",
+    "Skaði": PDF_ARCHIVE_ROOT / "Skaði",
+    "Body": PDF_ARCHIVE_ROOT / "Body",
+    "David Advice": PDF_ARCHIVE_ROOT / "David Advice",
+}
+
+# -------------------------------------------------------------------
+# SAFETY SETTINGS
+# -------------------------------------------------------------------
+
+# False = preview only: no compilation and no PDF copies.
+# True  = compile all eligible records and drop PDFs into PDF Archive.
+APPLY_CHANGES = True
+
+# False = preserve PDFs that already exist in destination folders.
+# True  = replace archived PDFs with newly compiled versions.
+OVERWRITE_EXISTING_PDFS = False
+
+# Keep compilation byproducts alongside the relevant .tex project,
+# not in the final PDF Archive.
+BUILD_FOLDER_NAME = "latex_build"
+
+# CSV audit files written into PDF Archive.
+MANIFEST_FILE = PDF_ARCHIVE_ROOT / "pdf_batch_manifest.csv"
+ERROR_FILE = PDF_ARCHIVE_ROOT / "pdf_batch_errors.csv"
+
+# -------------------------------------------------------------------
+# VALIDATE ENVIRONMENT
+# -------------------------------------------------------------------
+
+if not GENERATED_TEX_ROOT.exists():
+    raise FileNotFoundError(
+        f"Generated TeX root folder not found:\n{GENERATED_TEX_ROOT}"
+    )
+
+pdflatex_path = shutil.which("pdflatex")
+biber_path = shutil.which("biber")
+
+if pdflatex_path is None:
+    raise FileNotFoundError(
+        "pdflatex was not found in the Windows PATH."
+    )
+
+if biber_path is None:
+    raise FileNotFoundError(
+        "biber was not found in the Windows PATH."
+    )
+
+PDF_ARCHIVE_ROOT.mkdir(parents=True, exist_ok=True)
+
+# -------------------------------------------------------------------
+# FIND FULL STANDALONE TEX DOCUMENTS
+# -------------------------------------------------------------------
+
+all_tex_files = sorted(GENERATED_TEX_ROOT.rglob("*.tex"))
+standalone_tex_files = []
+
+for tex_file in all_tex_files:
+    try:
+        first_text = tex_file.read_text(
+            encoding="utf-8",
+            errors="replace",
+        )[:8000]
+
+        # Standalone files contain their own document preamble.
+        if r"\documentclass" in first_text:
+            standalone_tex_files.append(tex_file)
+
+    except OSError:
+        continue
+
+if not standalone_tex_files:
+    raise FileNotFoundError(
+        "No standalone .tex records containing \\documentclass were found."
+    )
+
+# -------------------------------------------------------------------
+# MAP EACH RECORD TO THE CORRECT PDF ARCHIVE CATEGORY
+# -------------------------------------------------------------------
+
+compilation_plan = []
+unmatched_tex_files = []
+
+for tex_file in standalone_tex_files:
+    relative_path = tex_file.relative_to(GENERATED_TEX_ROOT)
+    path_parts = relative_path.parts
+
+    # Expected:
+    # Generated_Tex_Records/<Division>/<Record ID>/<Record ID>.tex
+    if len(path_parts) < 3:
+        unmatched_tex_files.append({
+            "source_tex_file": str(tex_file),
+            "reason": (
+                "Unexpected location. Expected "
+                "Division/Record-ID/Record-ID.tex."
+            ),
+        })
+        continue
+
+    division = path_parts[0]
+
+    if division not in PDF_ARCHIVE_FOLDERS:
+        unmatched_tex_files.append({
+            "source_tex_file": str(tex_file),
+            "reason": (
+                f"No PDF Archive folder mapping configured for: {division}"
+            ),
+        })
+        continue
+
+    destination_folder = PDF_ARCHIVE_FOLDERS[division]
+    destination_pdf = destination_folder / f"{tex_file.stem}.pdf"
+
+    compilation_plan.append({
+        "division": division,
+        "tex_file": tex_file,
+        "tex_folder": tex_file.parent,
+        "build_folder": tex_file.parent / BUILD_FOLDER_NAME,
+        "destination_folder": destination_folder,
+        "destination_pdf": destination_pdf,
+    })
+
+if not compilation_plan:
+    raise ValueError(
+        "No generated .tex records could be mapped to your PDF Archive."
+    )
+
+# -------------------------------------------------------------------
+# PREVIEW THE COMPLETE PLAN
+# -------------------------------------------------------------------
+
+print("=" * 88)
+print("BATCH TEX-TO-PDF DROP PLAN")
+print("=" * 88)
+print(f"Standalone .tex records found: {len(standalone_tex_files)}")
+print(f"Records mapped to PDF Archive: {len(compilation_plan)}")
+print(f"Records not mapped:            {len(unmatched_tex_files)}")
+print()
+
+for item in compilation_plan:
+    print(f"Division:        {item['division']}")
+    print(f"TeX source:      {item['tex_file'].name}")
+    print(f"Build folder:    {item['build_folder']}")
+    print(f"PDF destination: {item['destination_pdf']}")
+    print()
+
+if unmatched_tex_files:
+    print("-" * 88)
+    print("UNMATCHED TEX RECORDS")
+    print("-" * 88)
+
+    for item in unmatched_tex_files:
+        print(f"{item['source_tex_file']}")
+        print(f"  Reason: {item['reason']}")
+
+# -------------------------------------------------------------------
+# INITIALIZE THE MANIFEST
+# -------------------------------------------------------------------
+
+manifest_rows = []
+
+for item in compilation_plan:
+    if item["destination_pdf"].exists() and not OVERWRITE_EXISTING_PDFS:
+        status = "Skipped: PDF already exists"
+    elif APPLY_CHANGES:
+        status = "Queued for compilation"
+    else:
+        status = "Preview only"
+
+    manifest_rows.append({
+        "status": status,
+        "repository_division": item["division"],
+        "source_tex_file": str(item["tex_file"]),
+        "build_folder": str(item["build_folder"]),
+        "destination_pdf": str(item["destination_pdf"]),
+        "message": "",
+    })
+
+# -------------------------------------------------------------------
+# HELPER: RUN ONE COMPILER STEP AND KEEP A COMPLETE LOG
+# -------------------------------------------------------------------
+
+def run_compiler_step(command, working_folder, description, log_parts):
+    """
+    Execute one local LaTeX/Biber process and append stdout/stderr to
+    the record's compilation log.
+    """
+    result = subprocess.run(
+        command,
+        cwd=working_folder,
+        text=True,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    log_parts.extend([
+        "=" * 80,
+        description,
+        "COMMAND:",
+        " ".join(command),
+        "",
+        "STANDARD OUTPUT:",
+        result.stdout,
+        "",
+        "STANDARD ERROR:",
+        result.stderr,
+        "",
+        f"RETURN CODE: {result.returncode}",
+        "",
+    ])
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"{description} failed with return code {result.returncode}."
+        )
+
+# -------------------------------------------------------------------
+# COMPILE AND DROP PDFS ONLY WHEN EXPLICITLY ENABLED
+# -------------------------------------------------------------------
+
+errors = []
+
+if APPLY_CHANGES:
+    print("\n" + "=" * 88)
+    print("COMPILING AND DROPPING PDF ARCHIVE RECORDS")
+    print("=" * 88)
+
+    for item, manifest_row in zip(compilation_plan, manifest_rows):
+        tex_file = item["tex_file"]
+        tex_folder = item["tex_folder"]
+        build_folder = item["build_folder"]
+        destination_folder = item["destination_folder"]
+        destination_pdf = item["destination_pdf"]
+
+        if destination_pdf.exists() and not OVERWRITE_EXISTING_PDFS:
+            manifest_row["status"] = "Skipped: PDF already exists"
+            print(f"Skipping existing PDF: {destination_pdf.name}")
+            continue
+
+        build_folder.mkdir(parents=True, exist_ok=True)
+        destination_folder.mkdir(parents=True, exist_ok=True)
+
+        record_log = build_folder / "manual_compile_log.txt"
+        log_parts = []
+
+        pdflatex_command = [
+            pdflatex_path,
+            "-interaction=nonstopmode",
+            "-file-line-error",
+            f"-output-directory={build_folder}",
+            tex_file.name,
+        ]
+
+        biber_command = [
+            biber_path,
+            "--input-directory",
+            str(build_folder),
+            "--output-directory",
+            str(build_folder),
+            tex_file.stem,
+        ]
+
+        print(f"\nCompiling: {tex_file.name}")
+
+        try:
+            # Pass 1 creates .aux and .bcf files for Biber.
+            run_compiler_step(
+                pdflatex_command,
+                tex_folder,
+                "pdfLaTeX pass 1",
+                log_parts,
+            )
+
+            # Biber reads the .bcf and creates the bibliography .bbl.
+            run_compiler_step(
+                biber_command,
+                tex_folder,
+                "Biber pass",
+                log_parts,
+            )
+
+            # Pass 2 incorporates bibliography material.
+            run_compiler_step(
+                pdflatex_command,
+                tex_folder,
+                "pdfLaTeX pass 2",
+                log_parts,
+            )
+
+            # Pass 3 resolves page counts, references, and document links.
+            run_compiler_step(
+                pdflatex_command,
+                tex_folder,
+                "pdfLaTeX pass 3",
+                log_parts,
+            )
+
+            record_log.write_text(
+                "\n".join(log_parts),
+                encoding="utf-8",
+            )
+
+            generated_pdf = build_folder / f"{tex_file.stem}.pdf"
+
+            if not generated_pdf.exists():
+                raise FileNotFoundError(
+                    "Compilation completed but no PDF was found at:\n"
+                    f"{generated_pdf}"
+                )
+
+            if generated_pdf.stat().st_size == 0:
+                raise ValueError(
+                    f"Compilation created an empty PDF:\n{generated_pdf}"
+                )
+
+            shutil.copy2(generated_pdf, destination_pdf)
+
+            manifest_row["status"] = "Compiled and archived"
+            manifest_row["message"] = (
+                f"Successfully copied {generated_pdf.name}"
+            )
+
+            print(f"Archived: {destination_pdf.name}")
+
+        except Exception as exc:
+            # Write partial logs even if an early compiler step failed.
+            record_log.write_text(
+                "\n".join(log_parts),
+                encoding="utf-8",
+            )
+
+            manifest_row["status"] = "Error"
+            manifest_row["message"] = str(exc)
+
+            errors.append({
+                "repository_division": item["division"],
+                "source_tex_file": str(tex_file),
+                "destination_pdf": str(destination_pdf),
+                "error": str(exc),
+                "compiler_log": str(record_log),
+            })
+
+            print(f"ERROR: {tex_file.name}")
+            print(f"  {exc}")
+
+# -------------------------------------------------------------------
+# WRITE CSV MANIFESTS
+# -------------------------------------------------------------------
+
+manifest_columns = [
+    "status",
+    "repository_division",
+    "source_tex_file",
+    "build_folder",
+    "destination_pdf",
+    "message",
+]
+
+with MANIFEST_FILE.open(
+    "w",
+    newline="",
+    encoding="utf-8-sig",
+) as manifest_handle:
+    writer = csv.DictWriter(
+        manifest_handle,
+        fieldnames=manifest_columns,
+    )
+    writer.writeheader()
+    writer.writerows(manifest_rows)
+
+if errors:
+    with ERROR_FILE.open(
+        "w",
+        newline="",
+        encoding="utf-8-sig",
+    ) as error_handle:
+        writer = csv.DictWriter(
+            error_handle,
+            fieldnames=[
+                "repository_division",
+                "source_tex_file",
+                "destination_pdf",
+                "error",
+                "compiler_log",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(errors)
+
+# -------------------------------------------------------------------
+# FINAL STATUS
+# -------------------------------------------------------------------
+
+print("\n" + "=" * 88)
+print("PDF ARCHIVE BATCH STATUS")
+print("=" * 88)
+
+if not APPLY_CHANGES:
+    print("Preview mode only: no files were compiled or copied.")
+    print("Review the printed plan and pdf_batch_manifest.csv.")
+    print()
+    print("When the paths look correct, change:")
+    print("APPLY_CHANGES = False")
+    print("to:")
+    print("APPLY_CHANGES = True")
+    print("Then rerun the full cell.")
+
+else:
+    compiled_count = sum(
+        row["status"] == "Compiled and archived"
+        for row in manifest_rows
+    )
+
+    skipped_count = sum(
+        row["status"] == "Skipped: PDF already exists"
+        for row in manifest_rows
+    )
+
+    print(f"PDFs compiled and archived: {compiled_count}")
+    print(f"Existing PDFs skipped:      {skipped_count}")
+    print(f"Errors:                      {len(errors)}")
+
+print()
+print(f"Manifest file: {MANIFEST_FILE}")
+
+if errors:
+    print(f"Error report:  {ERROR_FILE}")
