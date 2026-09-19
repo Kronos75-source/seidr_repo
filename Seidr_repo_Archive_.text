@@ -1,30 +1,72 @@
 from pathlib import Path
 from datetime import datetime
 import re
+import shutil
 import unicodedata
 
 # -------------------------------------------------------------------
-# SOURCE NOTE AND OUTPUT LOCATION
+# CHANGE ONLY THIS PATH FOR EACH NEW JOURNAL ENTRY
 # -------------------------------------------------------------------
 
 SOURCE_FILE = Path(
     r"C:\Users\Lord of Cinder\Desktop\Fall_2026\3. Seiðr"
-    r"\Seiðr Repository\2026\Body\2026-06-01 — Doen.txt"
+    r"\Seiðr Repository\2026 Raw Text\Freyja & Rán"
+    r"\2026-08-28 — With Rán.txt"
 )
-
-REPOSITORY_FOLDER = Path(
-    r"C:\Users\Lord of Cinder\Desktop\Fall_2026\3. Seiðr"
-    r"\Seiðr Repository"
-)
-
-OUTPUT_FOLDER = REPOSITORY_FOLDER / "Generated_Tex_Records"
 
 # -------------------------------------------------------------------
-# TEXT AND FILENAME HANDLING
+# FIXED ARCHIVE LOCATIONS
+# -------------------------------------------------------------------
+
+RAW_TEXT_ROOT = Path(
+    r"C:\Users\Lord of Cinder\Desktop\Fall_2026\3. Seiðr"
+    r"\Seiðr Repository\2026 Raw Text"
+)
+
+ARCHIVE_FOLDER = Path(
+    r"C:\Users\Lord of Cinder\Desktop\Fall_2026\3. Seiðr"
+    r"\Seiðr Repository\2026 Archive"
+)
+
+OUTPUT_ROOT = ARCHIVE_FOLDER / "Generated_Tex_Records"
+
+# Shared bibliography file used by your current standalone .tex setup.
+BIB_FILE = Path(
+    r"C:\Users\Lord of Cinder\Desktop\Fall_2026\3. Seiðr"
+    r"\Seiðr Repository\2026 Archive\Generated_Tex_Records"
+    r"\.tex Repo\seidr_repository_2026.bib"
+)
+
+# Optional logo image.
+# Leave as None to generate records with the built-in "SR" placeholder.
+LOGO_FILE = None
+
+# -------------------------------------------------------------------
+# SAFETY SETTINGS
+# -------------------------------------------------------------------
+
+# False = do not overwrite an already-generated record.
+# True  = replace the existing generated .tex record with a fresh copy.
+OVERWRITE_EXISTING_RECORD = False
+
+# -------------------------------------------------------------------
+# SOURCE DIVISION CONFIGURATION
+# -------------------------------------------------------------------
+
+VALID_DIVISIONS = {
+    "Skaði": "Entity-Focused Record",
+    "Body": "Somatic Record",
+    "David Advice": "Correspondence Record",
+    "Freyja & Rán": "Entity-Focused Record",
+    "Lilith": "Entity-Focused Record",
+}
+
+# -------------------------------------------------------------------
+# READ, PARSE, AND FORMAT FUNCTIONS
 # -------------------------------------------------------------------
 
 def read_text_file(file_path: Path) -> str:
-    """Read the source note without altering it."""
+    """Read common Windows text encodings without altering the source."""
     for encoding in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
         try:
             return file_path.read_text(encoding=encoding)
@@ -39,9 +81,11 @@ def read_text_file(file_path: Path) -> str:
 def parse_source_filename(file_path: Path) -> tuple[str, str]:
     """
     Parse:
-        2026-06-01 — Doen.txt
+        2026-08-28 — With Rán.txt
     into:
-        ('2026-06-01', 'Doen')
+        ('2026-08-28', 'With Rán').
+
+    If no YYYY-MM-DD prefix is available, use the file's modified date.
     """
     stem = file_path.stem.strip()
 
@@ -63,13 +107,20 @@ def parse_source_filename(file_path: Path) -> tuple[str, str]:
 
 
 def make_record_slug(text: str) -> str:
-    """Create a stable filename-safe record identifier segment."""
+    """
+    Produce an ASCII file-safe record-number portion.
+
+    Examples:
+        With Rán -> WITH-RAN
+        Skaði Notes -> SKADI-NOTES
+        Offering & Dreamwork -> OFFERING-DREAMWORK
+    """
     normalized = unicodedata.normalize("NFKD", text)
 
     normalized = "".join(
-        char
-        for char in normalized
-        if not unicodedata.combining(char)
+        character
+        for character in normalized
+        if not unicodedata.combining(character)
     )
 
     normalized = normalized.upper()
@@ -78,26 +129,24 @@ def make_record_slug(text: str) -> str:
     return normalized.strip("-") or "UNTITLED"
 
 
-def infer_record_type(folder_name: str) -> str:
-    """Assign an editable initial classification from the folder name."""
-    mapping = {
-        "Body": "Somatic Record",
-        "David Advice": "Correspondence Record",
-        "Freyja": "Entity-Focused Record",
-        "Lilith": "Entity-Focused Record",
-        "Skaði": "Entity-Focused Record",
-    }
+def safe_folder_name(text: str) -> str:
+    """Return a Windows-safe version of the repository division name."""
+    invalid_characters = r'<>:"/\|?*'
 
-    return mapping.get(folder_name, "Journal Record")
+    cleaned = text.strip()
 
+    for character in invalid_characters:
+        cleaned = cleaned.replace(character, "-")
 
-# -------------------------------------------------------------------
-# LATEX-SAFE PROSE
-# -------------------------------------------------------------------
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = cleaned.strip(" .")
+
+    return cleaned or "Uncategorized"
+
 
 def latex_escape(text: str) -> str:
     """
-    Escape characters that would otherwise have special meanings in LaTeX.
+    Escape LaTeX syntax characters but preserve ordinary Unicode characters.
     """
     replacements = {
         "\\": r"\textbackslash{}",
@@ -120,63 +169,217 @@ def latex_escape(text: str) -> str:
 
 def render_source_entry(text: str) -> str:
     """
-    Convert blank-line-separated .txt paragraphs into normal LaTeX prose.
+    Preserve blank-line paragraph breaks from the source .txt note.
     """
     normalized = text.replace("\r\n", "\n").replace("\r", "\n")
     raw_paragraphs = re.split(r"\n\s*\n+", normalized)
 
-    output_paragraphs = []
+    rendered_paragraphs = []
 
     for paragraph in raw_paragraphs:
-        lines = [
+        clean_lines = [
             line.strip()
             for line in paragraph.split("\n")
             if line.strip()
         ]
 
-        if lines:
-            output_paragraphs.append(
-                latex_escape(" ".join(lines))
+        if clean_lines:
+            rendered_paragraphs.append(
+                latex_escape(" ".join(clean_lines))
             )
 
-    if not output_paragraphs:
+    if not rendered_paragraphs:
         return r"\noindent\textit{No readable source text was found.}"
 
-    return "\n\n".join(output_paragraphs)
+    return "\n\n".join(rendered_paragraphs)
 
 
 # -------------------------------------------------------------------
-# BUILD A BODY-ONLY CHILD FILE
+# STANDALONE LATEX DOCUMENT TEMPLATE
 # -------------------------------------------------------------------
 
-def build_entry_file(metadata: dict, source_entry: str) -> str:
-    """
-    This output is intentionally NOT standalone.
+def build_standalone_tex(metadata: dict, source_entry_latex: str) -> str:
+    r"""
+    Create a complete standalone LaTeX archive record.
 
-    It must be inserted through:
-        \\input{Generated_Tex_Records/SR-2026-06-01-DOEN}
-
-    The master file supplies all packages, commands, colors, page formatting,
-    bibliography settings, and the document environment.
+    The resulting .tex file contains its own preamble and can be uploaded
+    directly to Overleaf. It requires only its copied .bib file; an optional
+    logo can be included later.
     """
     return rf"""% =====================================================================
-% GENERATED SEIÐRWORK ENTRY — BODY-ONLY FILE
-% Source: {metadata["source_filename"]}
-% Generated: {metadata["compiled_datetime"]}
-%
-% This file must be included by Seidr_repo.tex using \input{{...}}.
-% Do not compile this file by itself.
+%  GENERATED SEIÐRWORK ARCHIVE RECORD — STANDALONE DOCUMENT
+%  Source .txt file: {metadata["source_filename"]}
+%  Source relative path: {metadata["source_relative_path"]}
+%  Generated: {metadata["compiled_datetime"]}
 % =====================================================================
 
-\clearpage
+\documentclass[11pt,letterpaper]{{article}}
+
+\usepackage[T1]{{fontenc}}
+\usepackage[utf8]{{inputenc}}
+\usepackage{{lmodern}}
+\usepackage{{microtype}}
+\usepackage{{graphicx}}
+\usepackage{{xcolor}}
+\usepackage{{booktabs}}
+\usepackage{{array}}
+\usepackage{{enumitem}}
+\usepackage{{caption}}
+\usepackage{{fancyhdr}}
+\usepackage{{lastpage}}
+\usepackage{{titlesec}}
+\usepackage{{csquotes}}
+\usepackage[hyphens]{{url}}
+\usepackage[
+  letterpaper,
+  top=1.05in, bottom=1.15in, left=1.1in, right=1.1in,
+  headheight=15pt, headsep=18pt, footskip=30pt
+]{{geometry}}
+
+\definecolor{{linkgray}}{{gray}}{{0.25}}
+\definecolor{{rulegray}}{{gray}}{{0.35}}
+
+\usepackage[
+  colorlinks=true,
+  linkcolor=linkgray, citecolor=linkgray, urlcolor=linkgray,
+  pdfborder={{0 0 0}}
+]{{hyperref}}
+
+\usepackage[
+  backend=biber,
+  style=numeric,
+  sorting=none,
+  maxbibnames=99,
+  giveninits=true,
+  url=true,
+  doi=true,
+  isbn=false
+]{{biblatex}}
+\addbibresource{{seidr_repository_2026.bib}}
+
+\newcommand{{\headfont}}{{\sffamily}}
+\newcommand{{\organization}}{{Seiðrwork}}
+\newcommand{{\orgsub}}{{Department of Jotun Studies}}
+\newcommand{{\orgaddress}}{{Internal Archive \textbar{{}} Personal Research Record}}
+
+\newcommand{{\doctitle}}{{Seiðrwork Archive Record}}
+\newcommand{{\docsubject}}{{Subject: ``Journal Entry''}}
+\newcommand{{\docnumber}}{{{metadata["record_number"]}}}
+\newcommand{{\docdate}}{{{metadata["compiled_date"]}}}
+\newcommand{{\docclass}}{{Classification: Personal Archive / Restricted}}
+
+\newcommand{{\runningtitle}}{{SEIÐRWORK --- ARCHIVE RECORD}}
+\newcommand{{\runningclass}}{{PERSONAL ARCHIVE}}
+
+\newlength{{\logoheight}}
+\setlength{{\logoheight}}{{16mm}}
+
+\hypersetup{{
+  pdftitle={{\doctitle}},
+  pdfsubject={{\docsubject}},
+  pdfauthor={{}}
+}}
+
+\pagestyle{{fancy}}
+\fancyhf{{}}
+\renewcommand{{\headrulewidth}}{{0.4pt}}
+\renewcommand{{\footrulewidth}}{{0.4pt}}
+\fancyhead[L]{{\headfont\footnotesize\docnumber}}
+\fancyhead[R]{{\headfont\footnotesize\runningtitle}}
+\fancyfoot[L]{{\headfont\scriptsize\runningclass}}
+\fancyfoot[C]{{\headfont\footnotesize Page \thepage\ of \pageref*{{LastPage}}}}
+\fancyfoot[R]{{\headfont\scriptsize\docdate}}
+
+\fancypagestyle{{firstpage}}{{%
+  \fancyhf{{}}%
+  \renewcommand{{\headrulewidth}}{{0pt}}%
+  \renewcommand{{\footrulewidth}}{{0.4pt}}%
+  \fancyfoot[L]{{\headfont\scriptsize\runningclass}}%
+  \fancyfoot[C]{{\headfont\footnotesize Page \thepage\ of \pageref*{{LastPage}}}}%
+  \fancyfoot[R]{{\headfont\scriptsize\docdate}}%
+}}
+
+\newcommand{{\reportheader}}{{%
+  \thispagestyle{{firstpage}}%
+  \begingroup
+  \setlength{{\parindent}}{{0pt}}%
+  \noindent
+  \begin{{minipage}}[c]{{0.24\textwidth}}
+    {{\headfont\bfseries\Large SR}}
+  \end{{minipage}}%
+  \hfill
+  \begin{{minipage}}[c]{{0.72\textwidth}}
+    \raggedleft
+    {{\headfont\bfseries\Large\MakeUppercase{{\organization}}}}\\[3pt]
+    {{\headfont\normalsize\orgsub}}\\[3pt]
+    {{\headfont\scriptsize\color{{rulegray}}\orgaddress}}
+  \end{{minipage}}
+
+  \vspace{{8pt}}
+  {{\color{{rulegray}}\hrule height 1.1pt}}
+  \vspace{{1.8pt}}
+  {{\color{{rulegray}}\hrule height 0.4pt}}
+  \vspace{{26pt}}
+
+  \begin{{center}}
+    {{\headfont\bfseries\LARGE\doctitle\par}}
+    \vspace{{8pt}}
+    {{\headfont\large\color{{rulegray}}\docsubject\par}}
+  \end{{center}}
+
+  \vspace{{16pt}}
+  {{\footnotesize
+   \begin{{tabular*}}{{\textwidth}}{{@{{\extracolsep{{\fill}}}}l l r@{{}}}}
+     \toprule
+     {{\headfont\scshape Record No.}} & {{\headfont\scshape Date Compiled}} &
+     {{\headfont\scshape Archive Status}}\\
+     \midrule
+     \docnumber & \docdate & \docclass\\
+     \bottomrule
+   \end{{tabular*}}}}
+  \vspace{{22pt}}
+  \endgroup
+}}
+
+\newenvironment{{keywords}}[1][Record Summary]%
+  {{\begingroup\small
+   \vspace{{2pt}}{{\color{{rulegray}}\hrule height 0.4pt}}\vspace{{6pt}}
+   \noindent{{\headfont\bfseries\scshape #1\par}}\vspace{{4pt}}
+   \noindent\ignorespaces}}%
+  {{\par\vspace{{6pt}}{{\color{{rulegray}}\hrule height 0.4pt}}\vspace{{14pt}}\endgroup}}
+
+\titleformat{{\section}}[block]
+  {{\headfont\large\bfseries}}{{\thesection.}}{{0.6em}}{{}}[
+  \vspace{{2pt}}{{\color{{rulegray}}\titlerule[0.4pt]}}]
+\titleformat{{\subsection}}[block]
+  {{\headfont\normalsize\bfseries}}{{\thesubsection}}{{0.6em}}{{}}
+\titleformat{{\subsubsection}}[block]
+  {{\headfont\small\bfseries\itshape}}{{\thesubsubsection}}{{0.6em}}{{}}
+\titlespacing*{{\section}}{{0pt}}{{18pt}}{{8pt}}
+\titlespacing*{{\subsection}}{{0pt}}{{12pt}}{{5pt}}
+\titlespacing*{{\subsubsection}}{{0pt}}{{10pt}}{{4pt}}
+\setcounter{{secnumdepth}}{{3}}
+
+\captionsetup{{font=small, labelfont={{bf,sf}}, labelsep=period, justification=centering}}
+\setlist[itemize]{{leftmargin=1.4em, itemsep=2pt, topsep=4pt}}
+\setlist[enumerate]{{leftmargin=1.6em, itemsep=2pt, topsep=4pt}}
+\setlength{{\parindent}}{{1.5em}}
+\linespread{{1.05}}
+
+\newcommand{{\redacted}}{{[\textsc{{redacted}}]}}
+\newcommand{{\expunged}}{{[\textsc{{data expunged}}]}}
+\newcommand{{\blackbar}}[1]{{\textcolor{{black}}{{\rule[-0.15em]{{#1}}{{0.85em}}}}}}
+\newcommand{{\field}}[1]{{{{\headfont\bfseries #1:}}}}
+
+\begin{{document}}
+\reportheader
 
 \section*{{{metadata["record_number"]}: {metadata["primary_focus"]}}}
-\addcontentsline{{toc}}{{section}}{{{metadata["record_number"]}: {metadata["primary_focus"]}}}
 
 \begin{{keywords}}[Record Summary]
-This generated record preserves the source entry and metadata derived from its
-filename and repository location. Interpretation and further analysis remain
-open for later review.
+This generated record preserves the original source entry and available
+file-based metadata. Interpretation, comparative notes, and follow-up material
+remain open for later review.
 \end{{keywords}}
 
 \section{{Record Identification}}
@@ -197,7 +400,7 @@ open for later review.
 
 \subsection{{Source Entry}}
 
-{source_entry}
+{source_entry_latex}
 
 \section{{Practice or Encounter Record}}
 
@@ -241,7 +444,7 @@ open for later review.
 
 \subsection{{Archive Notes}}
 
-\noindent\textit{{Generated from the source entry:
+\noindent\textit{{Generated from the source journal entry:
 \texttt{{{metadata["source_filename"]}}}.}}
 
 \section{{Addendum}}
@@ -253,63 +456,135 @@ open for later review.
 \subsection{{Related Excerpts}}
 
 \noindent\textit{{Reserved for cross-referenced excerpts and sources.}}
+
+\printbibliography[heading=bibnumbered, title={{References}}]
+
+\end{{document}}
 """
 
 
 # -------------------------------------------------------------------
-# VALIDATE AND GENERATE
+# VALIDATE PATHS
 # -------------------------------------------------------------------
 
 if not SOURCE_FILE.exists():
-    raise FileNotFoundError(f"Source file not found:\n{SOURCE_FILE}")
+    raise FileNotFoundError(f"Source .txt file not found:\n{SOURCE_FILE}")
 
-if SOURCE_FILE.suffix.lower() != ".txt":
-    raise ValueError("SOURCE_FILE must be a .txt file.")
+if not RAW_TEXT_ROOT.exists():
+    raise FileNotFoundError(
+        f"Raw-text root folder not found:\n{RAW_TEXT_ROOT}"
+    )
+
+if not BIB_FILE.exists():
+    raise FileNotFoundError(
+        f"Bibliography file not found:\n{BIB_FILE}"
+    )
+
+try:
+    source_relative_path = SOURCE_FILE.relative_to(RAW_TEXT_ROOT)
+except ValueError as exc:
+    raise ValueError(
+        "SOURCE_FILE must be located somewhere inside RAW_TEXT_ROOT.\n"
+        f"SOURCE_FILE: {SOURCE_FILE}\n"
+        f"RAW_TEXT_ROOT: {RAW_TEXT_ROOT}"
+    ) from exc
+
+if len(source_relative_path.parts) < 2:
+    raise ValueError(
+        "SOURCE_FILE must be inside a named division folder below "
+        "the raw-text root."
+    )
+
+division = source_relative_path.parts[0]
+
+if division not in VALID_DIVISIONS:
+    raise ValueError(
+        f"Unrecognized source division: {division}\n"
+        f"Expected one of: {', '.join(VALID_DIVISIONS)}"
+    )
+
+# -------------------------------------------------------------------
+# READ SOURCE AND BUILD IDENTIFICATION METADATA
+# -------------------------------------------------------------------
 
 source_text = read_text_file(SOURCE_FILE)
 
 if not source_text.strip():
-    raise ValueError("Source file is empty.")
+    raise ValueError("The source .txt file is empty.")
 
-entry_date, title = parse_source_filename(SOURCE_FILE)
-division = SOURCE_FILE.parent.name
-record_number = f"SR-{entry_date}-{make_record_slug(title)}"
+entry_date, source_title = parse_source_filename(SOURCE_FILE)
 
-compiled_time = datetime.now()
-source_modified_time = datetime.fromtimestamp(
+record_number = (
+    f"SR-{entry_date}-{make_record_slug(source_title)}"
+)
+
+compiled_datetime = datetime.now()
+source_modified_datetime = datetime.fromtimestamp(
     SOURCE_FILE.stat().st_mtime
 )
 
 metadata = {
     "record_number": latex_escape(record_number),
-    "record_type": latex_escape(infer_record_type(division)),
-    "primary_focus": latex_escape(title),
+    "record_type": latex_escape(VALID_DIVISIONS[division]),
+    "primary_focus": latex_escape(source_title),
     "repository_division": latex_escape(division),
     "entry_date": latex_escape(entry_date),
-    "compiled_date": compiled_time.strftime("%Y-%m-%d"),
-    "compiled_datetime": compiled_time.strftime("%Y-%m-%d %H:%M:%S"),
+    "compiled_date": compiled_datetime.strftime("%Y-%m-%d"),
+    "compiled_datetime": compiled_datetime.strftime("%Y-%m-%d %H:%M:%S"),
     "source_filename": latex_escape(SOURCE_FILE.name),
-    "source_modified": source_modified_time.strftime("%Y-%m-%d %H:%M:%S"),
-    "associated_tags": latex_escape(f"{division}; {title}"),
+    "source_relative_path": latex_escape(str(source_relative_path)),
+    "source_modified": source_modified_datetime.strftime(
+        "%Y-%m-%d %H:%M:%S"
+    ),
+    "associated_tags": latex_escape(f"{division}; {source_title}"),
 }
 
-OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
+# -------------------------------------------------------------------
+# CREATE THE OUTPUT PROJECT
+# -------------------------------------------------------------------
 
-output_file = OUTPUT_FOLDER / f"{record_number}.tex"
+division_folder = safe_folder_name(division)
 
-output_file.write_text(
-    build_entry_file(
+record_folder = (
+    OUTPUT_ROOT
+    / division_folder
+    / record_number
+)
+
+output_tex = record_folder / f"{record_number}.tex"
+output_bib = record_folder / BIB_FILE.name
+
+if output_tex.exists() and not OVERWRITE_EXISTING_RECORD:
+    raise FileExistsError(
+        "A generated record already exists and overwrite protection is on:\n"
+        f"{output_tex}\n\n"
+        "Set OVERWRITE_EXISTING_RECORD = True only if you want to rebuild it."
+    )
+
+record_folder.mkdir(parents=True, exist_ok=True)
+
+output_tex.write_text(
+    build_standalone_tex(
         metadata,
         render_source_entry(source_text),
     ),
     encoding="utf-8",
 )
 
-print("=" * 78)
-print("OVERLEAF-SAFE BODY-ONLY ENTRY CREATED")
-print("=" * 78)
-print(f"Record number:  {record_number}")
-print(f"Output file:    {output_file}")
+shutil.copy2(BIB_FILE, output_bib)
+
+# -------------------------------------------------------------------
+# CONFIRM RESULTS
+# -------------------------------------------------------------------
+
+print("=" * 80)
+print("STANDALONE SEIÐRWORK TEX RECORD CREATED")
+print("=" * 80)
+print(f"Source .txt file:      {SOURCE_FILE.name}")
+print(f"Repository division:   {division}")
+print(f"Record number:         {record_number}")
+print(f"Entry date:            {entry_date}")
+print(f"Generated .tex file:   {output_tex}")
+print(f"Copied bibliography:   {output_bib}")
 print()
-print("Compile Seidr_repo.tex, not this generated child file.")
-print("Upload the Generated_Tex_Records folder to the Overleaf project.")
+print("The original .txt file was not modified or moved.")
