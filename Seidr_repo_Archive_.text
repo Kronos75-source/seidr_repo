@@ -1,0 +1,315 @@
+from pathlib import Path
+from datetime import datetime
+import re
+import unicodedata
+
+# -------------------------------------------------------------------
+# SOURCE NOTE AND OUTPUT LOCATION
+# -------------------------------------------------------------------
+
+SOURCE_FILE = Path(
+    r"C:\Users\Lord of Cinder\Desktop\Fall_2026\3. Seiðr"
+    r"\Seiðr Repository\2026\Body\2026-06-01 — Doen.txt"
+)
+
+REPOSITORY_FOLDER = Path(
+    r"C:\Users\Lord of Cinder\Desktop\Fall_2026\3. Seiðr"
+    r"\Seiðr Repository"
+)
+
+OUTPUT_FOLDER = REPOSITORY_FOLDER / "Generated_Tex_Records"
+
+# -------------------------------------------------------------------
+# TEXT AND FILENAME HANDLING
+# -------------------------------------------------------------------
+
+def read_text_file(file_path: Path) -> str:
+    """Read the source note without altering it."""
+    for encoding in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
+        try:
+            return file_path.read_text(encoding=encoding)
+        except UnicodeDecodeError:
+            continue
+
+    raise UnicodeError(
+        f"Could not decode source file:\n{file_path}"
+    )
+
+
+def parse_source_filename(file_path: Path) -> tuple[str, str]:
+    """
+    Parse:
+        2026-06-01 — Doen.txt
+    into:
+        ('2026-06-01', 'Doen')
+    """
+    stem = file_path.stem.strip()
+
+    match = re.match(
+        r"^(?P<date>\d{4}-\d{2}-\d{2})"
+        r"\s*(?:—|–|-)\s*"
+        r"(?P<title>.+?)\s*$",
+        stem,
+    )
+
+    if match:
+        return match.group("date"), match.group("title").strip()
+
+    fallback_date = datetime.fromtimestamp(
+        file_path.stat().st_mtime
+    ).strftime("%Y-%m-%d")
+
+    return fallback_date, stem
+
+
+def make_record_slug(text: str) -> str:
+    """Create a stable filename-safe record identifier segment."""
+    normalized = unicodedata.normalize("NFKD", text)
+
+    normalized = "".join(
+        char
+        for char in normalized
+        if not unicodedata.combining(char)
+    )
+
+    normalized = normalized.upper()
+    normalized = re.sub(r"[^A-Z0-9]+", "-", normalized)
+
+    return normalized.strip("-") or "UNTITLED"
+
+
+def infer_record_type(folder_name: str) -> str:
+    """Assign an editable initial classification from the folder name."""
+    mapping = {
+        "Body": "Somatic Record",
+        "David Advice": "Correspondence Record",
+        "Freyja": "Entity-Focused Record",
+        "Lilith": "Entity-Focused Record",
+        "Skaði": "Entity-Focused Record",
+    }
+
+    return mapping.get(folder_name, "Journal Record")
+
+
+# -------------------------------------------------------------------
+# LATEX-SAFE PROSE
+# -------------------------------------------------------------------
+
+def latex_escape(text: str) -> str:
+    """
+    Escape characters that would otherwise have special meanings in LaTeX.
+    """
+    replacements = {
+        "\\": r"\textbackslash{}",
+        "&": r"\&",
+        "%": r"\%",
+        "$": r"\$",
+        "#": r"\#",
+        "_": r"\_",
+        "{": r"\{",
+        "}": r"\}",
+        "~": r"\textasciitilde{}",
+        "^": r"\textasciicircum{}",
+    }
+
+    return "".join(
+        replacements.get(character, character)
+        for character in text
+    )
+
+
+def render_source_entry(text: str) -> str:
+    """
+    Convert blank-line-separated .txt paragraphs into normal LaTeX prose.
+    """
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    raw_paragraphs = re.split(r"\n\s*\n+", normalized)
+
+    output_paragraphs = []
+
+    for paragraph in raw_paragraphs:
+        lines = [
+            line.strip()
+            for line in paragraph.split("\n")
+            if line.strip()
+        ]
+
+        if lines:
+            output_paragraphs.append(
+                latex_escape(" ".join(lines))
+            )
+
+    if not output_paragraphs:
+        return r"\noindent\textit{No readable source text was found.}"
+
+    return "\n\n".join(output_paragraphs)
+
+
+# -------------------------------------------------------------------
+# BUILD A BODY-ONLY CHILD FILE
+# -------------------------------------------------------------------
+
+def build_entry_file(metadata: dict, source_entry: str) -> str:
+    """
+    This output is intentionally NOT standalone.
+
+    It must be inserted through:
+        \\input{Generated_Tex_Records/SR-2026-06-01-DOEN}
+
+    The master file supplies all packages, commands, colors, page formatting,
+    bibliography settings, and the document environment.
+    """
+    return rf"""% =====================================================================
+% GENERATED SEIÐRWORK ENTRY — BODY-ONLY FILE
+% Source: {metadata["source_filename"]}
+% Generated: {metadata["compiled_datetime"]}
+%
+% This file must be included by Seidr_repo.tex using \input{{...}}.
+% Do not compile this file by itself.
+% =====================================================================
+
+\clearpage
+
+\section*{{{metadata["record_number"]}: {metadata["primary_focus"]}}}
+\addcontentsline{{toc}}{{section}}{{{metadata["record_number"]}: {metadata["primary_focus"]}}}
+
+\begin{{keywords}}[Record Summary]
+This generated record preserves the source entry and metadata derived from its
+filename and repository location. Interpretation and further analysis remain
+open for later review.
+\end{{keywords}}
+
+\section{{Record Identification}}
+
+\noindent\field{{Record \#}} {metadata["record_number"]}\\
+\field{{Record Type}} {metadata["record_type"]}\\
+\field{{Primary Focus}} {metadata["primary_focus"]}\\
+\field{{Repository Division}} {metadata["repository_division"]}\\
+\field{{Entry Date}} {metadata["entry_date"]}\\
+\field{{Date Compiled}} {metadata["compiled_date"]}\\
+\field{{Source Format}} Journal entry\\
+\field{{Review Status}} New\\
+\field{{Associated Tags}} {metadata["associated_tags"]}\\
+\field{{Source Filename}} \texttt{{{metadata["source_filename"]}}}\\
+\field{{Source Last Modified}} {metadata["source_modified"]}
+
+\section{{Entry and Context}}
+
+\subsection{{Source Entry}}
+
+{source_entry}
+
+\section{{Practice or Encounter Record}}
+
+\subsection{{Preparation and Intention}}
+
+\noindent\textit{{Reserved for later review.}}
+
+\subsection{{Sequence of Events}}
+
+\noindent\textit{{Reserved for later review.}}
+
+\section{{Observed Material}}
+
+\subsection{{Symbols, Images, and Language}}
+
+\noindent\textit{{Reserved for later review.}}
+
+\subsection{{Somatic and Affective Notes}}
+
+\noindent\textit{{Reserved for later review.}}
+
+\subsection{{Patterns, Repetitions, and Variations}}
+
+\noindent\textit{{Reserved for later review.}}
+
+\section{{Interpretive Notes}}
+
+\subsection{{Working Interpretation}}
+
+\noindent\textit{{Reserved for later review.}}
+
+\subsection{{Alternative Readings and Limitations}}
+
+\noindent\textit{{Reserved for later review.}}
+
+\section{{Follow-Up and Archive Actions}}
+
+\subsection{{Recommended Follow-Up}}
+
+\noindent\textit{{Reserved for later review.}}
+
+\subsection{{Archive Notes}}
+
+\noindent\textit{{Generated from the source entry:
+\texttt{{{metadata["source_filename"]}}}.}}
+
+\section{{Addendum}}
+
+\subsection{{Subsequent Reflection}}
+
+\noindent\textit{{Reserved for dated later additions.}}
+
+\subsection{{Related Excerpts}}
+
+\noindent\textit{{Reserved for cross-referenced excerpts and sources.}}
+"""
+
+
+# -------------------------------------------------------------------
+# VALIDATE AND GENERATE
+# -------------------------------------------------------------------
+
+if not SOURCE_FILE.exists():
+    raise FileNotFoundError(f"Source file not found:\n{SOURCE_FILE}")
+
+if SOURCE_FILE.suffix.lower() != ".txt":
+    raise ValueError("SOURCE_FILE must be a .txt file.")
+
+source_text = read_text_file(SOURCE_FILE)
+
+if not source_text.strip():
+    raise ValueError("Source file is empty.")
+
+entry_date, title = parse_source_filename(SOURCE_FILE)
+division = SOURCE_FILE.parent.name
+record_number = f"SR-{entry_date}-{make_record_slug(title)}"
+
+compiled_time = datetime.now()
+source_modified_time = datetime.fromtimestamp(
+    SOURCE_FILE.stat().st_mtime
+)
+
+metadata = {
+    "record_number": latex_escape(record_number),
+    "record_type": latex_escape(infer_record_type(division)),
+    "primary_focus": latex_escape(title),
+    "repository_division": latex_escape(division),
+    "entry_date": latex_escape(entry_date),
+    "compiled_date": compiled_time.strftime("%Y-%m-%d"),
+    "compiled_datetime": compiled_time.strftime("%Y-%m-%d %H:%M:%S"),
+    "source_filename": latex_escape(SOURCE_FILE.name),
+    "source_modified": source_modified_time.strftime("%Y-%m-%d %H:%M:%S"),
+    "associated_tags": latex_escape(f"{division}; {title}"),
+}
+
+OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
+
+output_file = OUTPUT_FOLDER / f"{record_number}.tex"
+
+output_file.write_text(
+    build_entry_file(
+        metadata,
+        render_source_entry(source_text),
+    ),
+    encoding="utf-8",
+)
+
+print("=" * 78)
+print("OVERLEAF-SAFE BODY-ONLY ENTRY CREATED")
+print("=" * 78)
+print(f"Record number:  {record_number}")
+print(f"Output file:    {output_file}")
+print()
+print("Compile Seidr_repo.tex, not this generated child file.")
+print("Upload the Generated_Tex_Records folder to the Overleaf project.")
